@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 
 
-from .models import Patient, Appointment, UserProfile
+from .models import Patient, Appointment, UserProfile, DoctorAvailability
 from .invitation_utils import (
     generate_invitation_token,
     verify_invitation_token,
@@ -276,12 +276,67 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "doctor",
             self.instance.doctor if self.instance else None,
         )
+
         scheduled_at = data.get(
             "scheduled_at",
             self.instance.scheduled_at if self.instance else None,
         )
 
         if doctor and scheduled_at:
+            if timezone.is_naive(scheduled_at):
+                scheduled_at = timezone.make_aware(
+                    scheduled_at,
+                    timezone.get_current_timezone(),
+                )
+
+            local_datetime = timezone.localtime(scheduled_at)
+            appointment_date = local_datetime.date()
+            appointment_time = local_datetime.time().replace(
+                second=0,
+                microsecond=0,
+            )
+            weekday = appointment_date.strftime("%A").lower()
+
+            availability = DoctorAvailability.objects.filter(
+                doctor=doctor,
+                weekday=weekday,
+                is_available=True,
+            ).first()
+
+            if not availability:
+                raise serializers.ValidationError(
+                    {
+                        "scheduled_at": (
+                            "This doctor is not available on the selected day."
+                        )
+                    }
+                )
+
+            slot_seconds = appointment_time.hour * 3600 + appointment_time.minute * 60
+            start_seconds = (
+                availability.start_time.hour * 3600
+                + availability.start_time.minute * 60
+            )
+            end_seconds = (
+                availability.end_time.hour * 3600 + availability.end_time.minute * 60
+            )
+
+            if (
+                slot_seconds < start_seconds
+                or slot_seconds + 3600 > end_seconds
+                or slot_seconds % 3600 != start_seconds % 3600
+                or local_datetime.second != 0
+                or local_datetime.microsecond != 0
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "scheduled_at": (
+                            "Select a valid one-hour slot within the doctor's "
+                            "working hours."
+                        )
+                    }
+                )
+
             existing_appointments = Appointment.objects.filter(
                 doctor=doctor,
                 scheduled_at=scheduled_at,
@@ -292,17 +347,17 @@ class AppointmentSerializer(serializers.ModelSerializer):
                     appointment_id=self.instance.appointment_id
                 )
 
-            if existing_appointments.exists():
-                raise serializers.ValidationError(
-                    {
-                        "scheduled_at": (
-                            "This doctor already has an active appointment "
-                            "scheduled at this time. Please select another slot."
-                        )
-                    }
-                )
+                if existing_appointments.exists():
+                    raise serializers.ValidationError(
+                        {
+                            "scheduled_at": (
+                                "This doctor already has an active appointment "
+                                "scheduled at this time. Please select another slot."
+                            )
+                        }
+                    )
 
-        return data
+                return data
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -565,3 +620,50 @@ class OTPVerifySerializer(serializers.Serializer):
         max_length=6,
         trim_whitespace=False,
     )
+
+
+class DoctorAvailabilitySerializer(serializers.ModelSerializer):
+    doctor_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = DoctorAvailability
+        fields = [
+            "id",
+            "doctor",
+            "doctor_name",
+            "weekday",
+            "start_time",
+            "end_time",
+            "is_available",
+            "created_at",
+            "updated_at",
+        ]
+
+        read_only_fields = [
+            "id",
+            "doctor",
+            "doctor_name",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_doctor_name(self, obj):
+        name = f"{obj.doctor.first_name} {obj.doctor.last_name}".strip()
+        return name if name else obj.doctor.username
+
+    def validate(self, attrs):
+        start_time = attrs.get(
+            "start_time",
+            self.instance.start_time if self.instance else None,
+        )
+        end_time = attrs.get(
+            "end_time",
+            self.instance.end_time if self.instance else None,
+        )
+
+        if start_time and end_time and start_time >= end_time:
+            raise serializers.ValidationError(
+                {"end_time": "End time must be later than start time."}
+            )
+
+        return attrs

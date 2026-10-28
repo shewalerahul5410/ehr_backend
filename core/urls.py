@@ -15,6 +15,9 @@ from .views import (
     health_check,
     OTPLoginAPIView,
     OTPVerifyAPIView,
+    DoctorAvailabilityListCreateAPIView,
+    AvailableAppointmentSlotsAPIView,
+    DoctorAvailabilityDetailAPIView,
 )
 
 urlpatterns = [
@@ -65,4 +68,19 @@ urlpatterns = [
     ),
     path("auth/login/", OTPLoginAPIView.as_view(), name="otp_login"),
     path("auth/verify-otp/", OTPVerifyAPIView.as_view(), name="otp_verify"),
+    path(
+        "doctor-availability/",
+        DoctorAvailabilityListCreateAPIView.as_view(),
+        name="doctor-availability",
+    ),
+    path(
+        "available-slots/",
+        AvailableAppointmentSlotsAPIView.as_view(),
+        name="available-slots",
+    ),
+    path(
+        "doctor-availability/<int:id>/",
+        DoctorAvailabilityDetailAPIView.as_view(),
+        name="doctor-availability-detail",
+    ),
 ]

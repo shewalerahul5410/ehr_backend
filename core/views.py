@@ -19,7 +19,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Patient, Appointment, UserProfile
+from .models import Patient, Appointment, UserProfile, DoctorAvailability, LoginOTP
 from .permissions import (
     IsClinicalStaff,
     IsReceptionist,
@@ -34,6 +34,7 @@ from .serializers import (
     PatientSerializer,
     PatientWorkflowUpdateSerializer,
     AppointmentSerializer,
+    DoctorAvailabilitySerializer,
     UserProfileSerializer,
     StaffUserSerializer,
     PatientSetPasswordSerializer,
@@ -41,6 +42,7 @@ from .serializers import (
     StaffInviteSerializer,
     StaffSetPasswordSerializer,
     OTPLoginSerializer,
+    OTPVerifySerializer,
 )
 
 import secrets
@@ -49,9 +51,6 @@ from datetime import timedelta
 from django.contrib.auth import authenticate
 from django.contrib.auth.hashers import make_password, check_password
 from rest_framework_simplejwt.tokens import RefreshToken
-
-from .models import Patient, Appointment, UserProfile, LoginOTP
-from .serializers import OTPLoginSerializer, OTPVerifySerializer
 
 
 from .invitation_utils import (
@@ -714,4 +713,141 @@ class OTPVerifyAPIView(APIView):
                 "refresh": str(refresh),
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class DoctorAvailabilityListCreateAPIView(ListCreateAPIView):
+    serializer_class = DoctorAvailabilitySerializer
+    permission_classes = [IsAuthenticated, IsDoctor]
+
+    def get_queryset(self):
+        return DoctorAvailability.objects.filter(doctor=self.request.user)
+
+    def perform_create(self, serializer):
+        weekday = serializer.validated_data["weekday"]
+
+        if DoctorAvailability.objects.filter(
+            doctor=self.request.user,
+            weekday=weekday,
+        ).exists():
+            raise ValidationError(
+                {
+                    "weekday": "Availability for this weekday already exists. Update it instead."
+                }
+            )
+
+        serializer.save(doctor=self.request.user)
+
+
+class DoctorAvailabilityDetailAPIView(RetrieveUpdateDestroyAPIView):
+    serializer_class = DoctorAvailabilitySerializer
+    permission_classes = [IsAuthenticated, IsDoctor]
+    lookup_field = "id"
+
+    def get_queryset(self):
+        return DoctorAvailability.objects.filter(doctor=self.request.user)
+
+
+class AvailableAppointmentSlotsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        doctor_id = request.query_params.get("doctor_id")
+        date_string = request.query_params.get("date")
+
+        if not doctor_id or not date_string:
+            return Response(
+                {"detail": "doctor_id and date are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            selected_date = datetime.strptime(date_string, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"detail": "Date must use YYYY-MM-DD format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        doctor_exists = UserProfile.objects.filter(
+            user_id=doctor_id,
+            role=UserProfile.Role.DOCTOR,
+        ).exists()
+
+        if not doctor_exists:
+            return Response(
+                {"detail": "Doctor not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        weekday = selected_date.strftime("%A").lower()
+
+        availability = DoctorAvailability.objects.filter(
+            doctor_id=doctor_id,
+            weekday=weekday,
+            is_available=True,
+        ).first()
+
+        if not availability:
+            return Response({"date": date_string, "slots": []})
+
+        start = availability.start_time
+        end = availability.end_time
+
+        existing_appointments = (
+            Appointment.objects.filter(
+                doctor_id=doctor_id,
+                scheduled_at__date=selected_date,
+            )
+            .exclude(status=Appointment.Status.CANCELLED)
+            .values_list("scheduled_at", flat=True)
+        )
+
+        booked_times = {
+            timezone.localtime(appointment_time).time().replace(second=0, microsecond=0)
+            for appointment_time in existing_appointments
+        }
+
+        slots = []
+        current_time = start
+
+        while True:
+            from datetime import time as time_type
+
+            total_seconds = (
+                current_time.hour * 3600
+                + current_time.minute * 60
+                + current_time.second
+            ) + 3600
+
+            if total_seconds > (end.hour * 3600 + end.minute * 60 + end.second):
+                break
+
+            next_time = time_type(
+                total_seconds // 3600,
+                (total_seconds % 3600) // 60,
+                total_seconds % 60,
+            )
+
+            slot_datetime = timezone.make_aware(
+                datetime.combine(selected_date, current_time),
+                timezone.get_current_timezone(),
+            )
+
+            if current_time not in booked_times and slot_datetime > timezone.now():
+                slots.append(
+                    {
+                        "start_time": current_time.strftime("%H:%M"),
+                        "end_time": next_time.strftime("%H:%M"),
+                    }
+                )
+
+            current_time = next_time
+
+        return Response(
+            {
+                "doctor_id": doctor_id,
+                "date": date_string,
+                "slots": slots,
+            }
         )

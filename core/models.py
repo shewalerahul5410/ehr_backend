@@ -253,3 +253,52 @@ class LoginOTP(models.Model):
 
     def __str__(self):
         return f"Login OTP for {self.user.username}"
+
+
+class DoctorAvailability(models.Model):
+    class Weekday(models.TextChoices):
+        MONDAY = "monday", "Monday"
+        TUESDAY = "tuesday", "Tuesday"
+        WEDNESDAY = "wednesday", "Wednesday"
+        THURSDAY = "thursday", "Thursday"
+        FRIDAY = "friday", "Friday"
+        SATURDAY = "saturday", "Saturday"
+        SUNDAY = "sunday", "Sunday"
+
+    doctor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="availability_schedules",
+    )
+
+    weekday = models.CharField(
+        max_length=10,
+        choices=Weekday.choices,
+    )
+
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+
+    is_available = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["weekday", "start_time"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["doctor", "weekday"],
+                name="unique_doctor_weekday_availability",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(start_time__lt=models.F("end_time")),
+                name="doctor_availability_start_before_end",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.doctor.username} - {self.weekday}: "
+            f"{self.start_time} to {self.end_time}"
+        )
